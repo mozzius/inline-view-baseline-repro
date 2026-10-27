@@ -1,0 +1,59 @@
+diff --git a/node_modules/react-native/ReactCommon/react/renderer/textlayoutmanager/platform/ios/react/renderer/textlayoutmanager/RCTTextLayoutManager.mm b/node_modules/react-native/ReactCommon/react/renderer/textlayoutmanager/platform/ios/react/renderer/textlayoutmanager/RCTTextLayoutManager.mm
+index 5f9847a..3653eaf 100644
+--- a/node_modules/react-native/ReactCommon/react/renderer/textlayoutmanager/platform/ios/react/renderer/textlayoutmanager/RCTTextLayoutManager.mm
++++ b/node_modules/react-native/ReactCommon/react/renderer/textlayoutmanager/platform/ios/react/renderer/textlayoutmanager/RCTTextLayoutManager.mm
+@@ -20,6 +20,15 @@
+ 
+ using namespace facebook::react;
+ 
++// [repro] Tell the app which placement the last measurement used, so it can show that the patch is compiled in.
++static void ReproEchoInlineBaselineMode(NSString *mode)
++{
++  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
++  if (![mode isEqualToString:[defaults stringForKey:@"ReproInlineBaselineMeasured"]]) {
++    [defaults setObject:mode forKey:@"ReproInlineBaselineMeasured"];
++  }
++}
++
+ @implementation RCTTextLayoutManager {
+   SimpleThreadSafeCache<AttributedString, std::shared_ptr<void>, 256> _cache;
+ }
+@@ -631,6 +640,38 @@ - (TextMeasurement)_measureTextStorage:(NSTextStorage *)textStorage
+                            glyphRect.origin.y + glyphRect.size.height - attachmentSize.height + font.descender},
+                       .size = attachmentSize};
+ 
++                  // [repro] The fix: sit the attachment on the baseline TextKit laid its line out with. That
++                  // baseline already includes the offset that centers glyphs within a custom `lineHeight`
++                  // (RCTApplyBaselineOffset), which the line bottom plus the font's descender does not.
++                  NSUInteger glyphIndex = attachmentGlyphRange.location;
++                  CGRect lineFragmentRect = [layoutManager lineFragmentRectForGlyphAtIndex:glyphIndex
++                                                                            effectiveRange:NULL];
++                  CGFloat baseline = lineFragmentRect.origin.y + [layoutManager locationForGlyphAtIndex:glyphIndex].y;
++                  CGRect fixedFrame = {
++                      .origin = {glyphRect.origin.x, baseline - attachmentSize.height}, .size = attachmentSize};
++
++                  // [repro] Runtime switch, set from JS with Settings.set({ReproInlineBaselineFix}).
++                  BOOL reproFix = [[NSUserDefaults standardUserDefaults] boolForKey:@"ReproInlineBaselineFix"];
++                  NSLog(
++                      @"[inline-baseline] %@: %.0fx%.0f view, line %.2f..%.2f, baseline %.2f, attachment font %@ %.1f "
++                      @"(descender %.2f): stock bottom %.2f (%+.2f from baseline), fixed bottom %.2f",
++                      reproFix ? @"patched" : @"stock",
++                      attachmentSize.width,
++                      attachmentSize.height,
++                      lineFragmentRect.origin.y,
++                      CGRectGetMaxY(lineFragmentRect),
++                      baseline,
++                      font.fontName,
++                      font.pointSize,
++                      font.descender,
++                      CGRectGetMaxY(frame),
++                      CGRectGetMaxY(frame) - baseline,
++                      CGRectGetMaxY(fixedFrame));
++                  ReproEchoInlineBaselineMode(reproFix ? @"patched" : @"stock");
++                  if (reproFix) {
++                    frame = fixedFrame;
++                  }
++
+                   auto rect = facebook::react::Rect{
+                       .origin = facebook::react::Point{.x = frame.origin.x, .y = frame.origin.y},
+                       .size = facebook::react::Size{.width = frame.size.width, .height = frame.size.height}};
