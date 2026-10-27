@@ -1,8 +1,8 @@
 diff --git a/node_modules/react-native/ReactCommon/react/renderer/textlayoutmanager/platform/ios/react/renderer/textlayoutmanager/RCTTextLayoutManager.mm b/node_modules/react-native/ReactCommon/react/renderer/textlayoutmanager/platform/ios/react/renderer/textlayoutmanager/RCTTextLayoutManager.mm
-index 5f9847a..3653eaf 100644
+index 5f9847a..2c31364 100644
 --- a/node_modules/react-native/ReactCommon/react/renderer/textlayoutmanager/platform/ios/react/renderer/textlayoutmanager/RCTTextLayoutManager.mm
 +++ b/node_modules/react-native/ReactCommon/react/renderer/textlayoutmanager/platform/ios/react/renderer/textlayoutmanager/RCTTextLayoutManager.mm
-@@ -20,6 +20,15 @@
+@@ -20,6 +20,32 @@
  
  using namespace facebook::react;
  
@@ -15,10 +15,50 @@ index 5f9847a..3653eaf 100644
 +  }
 +}
 +
++// [repro] Log a line only the first time it's seen, since text is measured many times.
++static void ReproLogOnce(NSString *line)
++{
++  static NSMutableSet<NSString *> *seen;
++  static dispatch_once_t onceToken;
++  dispatch_once(&onceToken, ^{
++    seen = [NSMutableSet new];
++  });
++  @synchronized(seen) {
++    if ([seen containsObject:line]) {
++      return;
++    }
++    [seen addObject:line];
++  }
++  NSLog(@"%@", line);
++}
++
  @implementation RCTTextLayoutManager {
    SimpleThreadSafeCache<AttributedString, std::shared_ptr<void>, 256> _cache;
  }
-@@ -631,6 +640,38 @@ - (TextMeasurement)_measureTextStorage:(NSTextStorage *)textStorage
+@@ -431,6 +457,22 @@ - (NSTextStorage *)_textStorageAndLayoutManagerWithAttributesString:(NSAttribute
+   layoutManager.usesFontLeading = NO;
+   [layoutManager addTextContainer:textContainer];
+ 
++  // [repro] Show which attributes React Native gives an inline view's run, before TextKit fills in defaults.
++  [attributedString
++      enumerateAttribute:NSAttachmentAttributeName
++                 inRange:NSMakeRange(0, attributedString.length)
++                 options:0
++              usingBlock:^(id attachment, NSRange range, BOOL *stop) {
++                if (attachment == nil) {
++                  return;
++                }
++                NSArray<NSString *> *keys = [[attributedString attributesAtIndex:range.location effectiveRange:NULL]
++                                                 .allKeys sortedArrayUsingSelector:@selector(compare:)];
++                ReproLogOnce([NSString
++                    stringWithFormat:@"[inline-baseline] attachment run attributes from React Native: %@",
++                                     [keys componentsJoinedByString:@", "]]);
++              }];
++
+   NSTextStorage *textStorage = [[NSTextStorage alloc] initWithAttributedString:attributedString];
+ 
+   RCTApplyBaselineOffset(textStorage);
+@@ -631,6 +673,61 @@ - (TextMeasurement)_measureTextStorage:(NSTextStorage *)textStorage
                             glyphRect.origin.y + glyphRect.size.height - attachmentSize.height + font.descender},
                        .size = attachmentSize};
  
@@ -34,14 +74,37 @@ index 5f9847a..3653eaf 100644
 +
 +                  // [repro] Runtime switch, set from JS with Settings.set({ReproInlineBaselineFix}).
 +                  BOOL reproFix = [[NSUserDefaults standardUserDefaults] boolForKey:@"ReproInlineBaselineFix"];
++
++                  // [repro] The text around the view: the character before it, or after it at the start.
++                  NSUInteger textIndex = range.location > 0 ? range.location - 1 : NSMaxRange(range);
++                  NSDictionary<NSAttributedStringKey, id> *textAttributes = textIndex < textStorage.length
++                      ? [textStorage attributesAtIndex:textIndex effectiveRange:NULL]
++                      : @{};
++                  UIFont *textFont = textAttributes[NSFontAttributeName];
++                  NSParagraphStyle *textParagraphStyle = textAttributes[NSParagraphStyleAttributeName];
++                  NSNumber *attachmentBaselineOffset =
++                      [textStorage attribute:NSBaselineOffsetAttributeName atIndex:range.location effectiveRange:NULL];
 +                  NSLog(
-+                      @"[inline-baseline] %@: %.0fx%.0f view, line %.2f..%.2f, baseline %.2f, attachment font %@ %.1f "
-+                      @"(descender %.2f): stock bottom %.2f (%+.2f from baseline), fixed bottom %.2f",
++                      @"[inline-baseline] %@: view %.2fx%.2f | text font %@ %.2f (ascender %.3f, descender %.3f, "
++                      @"lineHeight %.3f, leading %.3f), paragraph lineHeight %.2f, baseline offset %.3f | line "
++                      @"%.3f..%.3f, glyph rect %.3f..%.3f, glyph location y %.3f, baseline %.3f | attachment font %@ %.1f "
++                      @"(descender %.3f) | stock bottom %.3f (%+.3f from baseline), fixed bottom %.3f",
 +                      reproFix ? @"patched" : @"stock",
 +                      attachmentSize.width,
 +                      attachmentSize.height,
++                      textFont.fontName,
++                      textFont.pointSize,
++                      textFont.ascender,
++                      textFont.descender,
++                      textFont.lineHeight,
++                      textFont.leading,
++                      textParagraphStyle.maximumLineHeight,
++                      attachmentBaselineOffset.doubleValue,
 +                      lineFragmentRect.origin.y,
 +                      CGRectGetMaxY(lineFragmentRect),
++                      glyphRect.origin.y,
++                      CGRectGetMaxY(glyphRect),
++                      [layoutManager locationForGlyphAtIndex:glyphIndex].y,
 +                      baseline,
 +                      font.fontName,
 +                      font.pointSize,
