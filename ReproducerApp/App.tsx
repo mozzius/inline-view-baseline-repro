@@ -1,19 +1,18 @@
 /**
- * Inline views sit below the text baseline on iOS when `lineHeight` is taller
- * than the font's own line height.
+ * A View nested in a Text should sit with its bottom on the text baseline, like
+ * the letters do. On iOS (Fabric, React Native 0.82 and later) it sits below it.
  *
- * Each sample is a `Text` with a blue square `View` nested in it. The red
- * hairline is the baseline of each line, taken from `onTextLayout`
- * (line.y + line.ascender). The square's bottom should sit on it, like the
- * bottoms of the letters do. The number on the right is the square's bottom
- * minus the baseline of its line, in points, from the square's `onLayout`:
+ * Each sample is a `Text` with a blue `View` nested in it. The red hairline is
+ * the baseline of each line, taken from `onTextLayout`
+ * (line.y + line.ascender). The number on the right is the view's bottom minus
+ * the baseline of its line, in points, from the view's `measureLayout`:
  * positive means below the baseline.
  *
  * Only the samples follow the system text size, so that the rest of the
  * screen stays legible at the accessibility sizes.
  *
- * The stock/patched switch only does anything with the patch in patches/
- * compiled in (see the README).
+ * The stock/patched switch only does anything on iOS, with the patch in
+ * patches/ compiled in (see the README).
  *
  * @format
  */
@@ -44,8 +43,17 @@ type TextLayoutLine = TextLayoutEvent['nativeEvent']['lines'][number];
 type Sample = {
   fontSize: number;
   lineHeight?: number;
-  /** Width and height of the inline square. */
+  fontWeight?: 'bold';
+  /** Height of the inline view, and its width unless `width` is set. */
   size: number;
+  width?: number;
+  /**
+   * Font size of a nested `Text` before the view, so that the line mixes two
+   * font sizes.
+   */
+  nestedFontSize?: number;
+  /** Row label, if not `fontSize / lineHeight`. */
+  label?: string;
 };
 
 const IS_IOS = Platform.OS === 'ios';
@@ -65,6 +73,30 @@ const SAMPLES: Sample[] = [
   { fontSize: 24, lineHeight: 28, size: 16 },
   { fontSize: 24, lineHeight: 36, size: 16 },
 ];
+
+/*
+ * The case from react/react-native#53092: bold 14pt text with
+ * `lineHeight: 14 * 1.2`, and a 54x20 view, taller than the line.
+ */
+const ISSUE_53092: Sample = {
+  fontSize: 14,
+  lineHeight: 14 * 1.2,
+  fontWeight: 'bold',
+  size: 20,
+  width: 54,
+  label: '#53092',
+};
+
+/*
+ * 15pt text with a nested 24pt word before the view. The line's descent, and
+ * so its baseline, comes from the 24pt font, not the view's own text.
+ */
+const MIXED: Sample = {
+  fontSize: 15,
+  size: 12,
+  nestedFontSize: 24,
+  label: '15 + 24',
+};
 
 const PARAGRAPH: Sample = { fontSize: 15, lineHeight: 24, size: 12 };
 
@@ -161,30 +193,32 @@ function Screen() {
         </Text>
       ) : null}
 
-      <View style={styles.toggle}>
-        {(['stock', 'patched'] as const).map(option => (
-          <Pressable
-            key={option}
-            accessibilityRole="button"
-            accessibilityState={{ selected: mode === option }}
-            onPress={() => select(option)}
-            style={[
-              styles.toggleOption,
-              mode === option && styles.toggleOptionSelected,
-            ]}
-          >
-            <Text
-              allowFontScaling={false}
+      {!IS_IOS ? null : (
+        <View style={styles.toggle}>
+          {(['stock', 'patched'] as const).map(option => (
+            <Pressable
+              key={option}
+              accessibilityRole="button"
+              accessibilityState={{ selected: mode === option }}
+              onPress={() => select(option)}
               style={[
-                styles.toggleText,
-                mode === option && styles.toggleTextSelected,
+                styles.toggleOption,
+                mode === option && styles.toggleOptionSelected,
               ]}
             >
-              {option}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
+              <Text
+                allowFontScaling={false}
+                style={[
+                  styles.toggleText,
+                  mode === option && styles.toggleTextSelected,
+                ]}
+              >
+                {option}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
 
       <View style={styles.header}>
         <Text
@@ -204,21 +238,34 @@ function Screen() {
 
       {!ready ? null : (
         <>
-          {SAMPLES.map(sample => {
-            const label = `${sample.fontSize} / ${sample.lineHeight ?? '–'}`;
+          {[...SAMPLES, ISSUE_53092, MIXED].map(sample => {
+            const label =
+              sample.label ??
+              `${sample.fontSize} / ${sample.lineHeight ?? '–'}`;
             return (
               <SampleRow
                 key={label}
                 label={label}
                 sample={sample}
                 mode={mode}
-                before={`${WORD} `}
+                before={
+                  sample.nestedFontSize ? (
+                    <>
+                      {'HEX '}
+                      <Text style={{ fontSize: sample.nestedFontSize }}>
+                        HOLM
+                      </Text>{' '}
+                    </>
+                  ) : (
+                    `${WORD} `
+                  )
+                }
               />
             );
           })}
 
           <Text allowFontScaling={false} style={styles.sectionTitle}>
-            Wrapped, 15 / 24. The square ends line 2.
+            Wrapped, 15 / 24, with the square mid-paragraph.
           </Text>
           <SampleRow
             sample={PARAGRAPH}
@@ -245,7 +292,7 @@ function SampleRow({
   sample: Sample;
   mode: Mode;
   /** Text before the inline square. */
-  before: string;
+  before: React.ReactNode;
   /** Text after the inline square. */
   after?: string;
   /** Lay the sample out full width, with the readout under it. */
@@ -285,7 +332,11 @@ function SampleRow({
         ref={textRef}
         style={[
           styles.sampleText,
-          { fontSize: sample.fontSize, lineHeight: sample.lineHeight },
+          {
+            fontSize: sample.fontSize,
+            lineHeight: sample.lineHeight,
+            fontWeight: sample.fontWeight,
+          },
         ]}
         /*
          * React Native caches text measurements by the layout-relevant text
@@ -299,7 +350,10 @@ function SampleRow({
         {before}
         <View
           ref={squareRef}
-          style={[styles.square, { width: sample.size, height: sample.size }]}
+          style={[
+            styles.square,
+            { width: sample.width ?? sample.size, height: sample.size },
+          ]}
         />
         {after}
       </Text>
